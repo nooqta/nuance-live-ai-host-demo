@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noqta × Nuance Live demo</title>
+<style>
+  :root { --bg:#0b1220; --card:#131c2e; --line:#24304a; --text:#e8edf6; --muted:#9aa7bd; --accent:#2f7bff; --ok:#22c55e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: Inter, system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; }
+  header b { font-size:18px; } header span { color:var(--muted); font-size:14px; }
+  main { display:grid; grid-template-columns: minmax(320px, 560px) 1fr; gap:24px; padding:24px; }
+  .stage { background:#000; border-radius:16px; aspect-ratio: 1/1; overflow:hidden; position:relative; }
+  video { width:100%; height:100%; object-fit:cover; }
+  #status { position:absolute; left:12px; bottom:12px; background:rgba(0,0,0,.6); padding:6px 10px; border-radius:8px; font-size:13px; }
+  .controls { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  button, select { font:inherit; padding:10px 16px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:16px; }
+  .panel h3 { margin:0 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  #transcript { height:260px; overflow:auto; font-size:14px; line-height:1.5; }
+  #transcript p { margin:4px 0; } #transcript .you { color:#93c5fd; }
+  .svc { border-left:3px solid var(--accent); padding:8px 12px; margin:8px 0; animation: pop .3s ease; }
+  .svc b { display:block; }
+  .contact { border-left:3px solid var(--ok); }
+  .contact a { color:var(--ok); }
+  @keyframes pop { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:none; } }
+  small { color:var(--muted); }
+</style>
+</head>
+<body>
+<header><b>noqta.tn</b><span>Live AI host demo — Nuance Live API (English only)</span><span id="usage"></span></header>
+<main>
+  <section>
+    <div class="stage">
+      <video id="avatar-video" autoplay playsinline></video>
+      <audio id="avatar-audio" autoplay></audio>
+      <div id="status">Idle</div>
+    </div>
+    <div class="controls">
+      <select id="persona"><option value="mira">Mira</option><option value="sonia">Sonia</option><option value="sam">Sam (Sami)</option></select>
+      <button id="start" class="primary">Start call</button>
+      <button id="hang-up">Hang up</button>
+    </div>
+    <p><small>Microphone only, camera is off. Each call spends credits (60 a day on this key). Hang up when done.</small></p>
+  </section>
+  <section>
+    <div class="panel"><h3>On your screen (the host puts things here)</h3><div id="cards"><small>Ask about automation, WhatsApp agents, dashboards, a website, e-invoicing…</small></div></div>
+    <div class="panel"><h3>Transcript</h3><div id="transcript"></div></div>
+  </section>
+</main>
+<script type="module">
+import { createNuanceConversation } from "https://esm.sh/@nuancelabs/js-sdk@0.37.1";
+
+const $ = (id) => document.getElementById(id);
+const services = Object.fromEntries((await (await fetch("/api/services")).json()).map(([id, t, d]) => [id, { t, d }]));
+const setStatus = (s) => ($("status").textContent = s);
+async function refreshUsage() {
+  try {
+    const u = await (await fetch("/api/usage")).json();
+    $("usage").textContent = u.credits ? `· credits left today: ${u.credits.remaining}/${u.limits.daily_credits}` : "";
+  } catch (err) { console.warn("usage check failed", err); }
+}
+refreshUsage();
+
+let conversation = null, line = null;
+function say(who, text) {
+  const p = document.createElement("p");
+  if (who === "you") p.className = "you";
+  p.textContent = (who === "you" ? "You: " : "Host: ") + text;
+  $("transcript").append(p); $("transcript").scrollTop = 1e9;
+  return p;
+}
+function card(html, cls = "") {
+  const d = document.createElement("div"); d.className = "svc " + cls; d.innerHTML = html;
+  if ($("cards").querySelector("small")) $("cards").innerHTML = "";
+  $("cards").prepend(d);
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" })[c]);
+
+$("start").onclick = async () => {
+  if (conversation) return;
+  const persona = $("persona").value;
+  conversation = createNuanceConversation({
+    token: async () => {
+      const r = await fetch(`/api/token?persona=${persona}`, { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      return (await r.json()).token;
+    },
+    mediaDevices: { cameraEnabled: false },
+    maxSessionSeconds: 300,
+  });
+  window.conversation = conversation; // handy for typed tests from the console
+  conversation.onChange((e) => {
+    if (e.type === "state-changed") setStatus(e.state);
+    if (e.type === "avatar-preparing") setStatus("Host is getting ready (up to ~30 s)…");
+    if (e.type === "tracks-changed") {
+      conversation.avatar.videoTrack?.attach($("avatar-video"));
+      conversation.avatar.audioTrack?.attach($("avatar-audio"));
+    }
+    if (e.type === "avatar-presented") {
+      setStatus("Live");
+      conversation.sendInterfaceEvent({ type: "response.create", response: { instructions: "Welcome the visitor to Noqta, say your name, and ask what their business does." } });
+    }
+    if (e.type === "time-remaining") setStatus(`Live · about ${Math.round(e.secondsRemaining / 60)} min left`);
+    if (e.type === "session-ended") { setStatus(`Ended: ${e.reason}`); conversation = null; refreshUsage(); }
+  });
+  conversation.onInterfaceEvent((e) => {
+    if (e.type === "session.output_transcript.delta") { line ??= say("host", ""); line.textContent += String(e.delta); }
+    if (e.type === "session.output_audio.done") line = null;
+    if (e.type === "session.input_transcript.done") { line = null; say("you", e.transcript ?? ""); }
+    if (e.type === "error") console.warn("nuance error", e);
+  });
+  conversation.onToolCall((call) => {
+    const a = call.arguments ?? {};
+    if (call.name === "show_service" && services[a.service]) {
+      const s = services[a.service];
+      card(`<b>${esc(s.t)}</b>${esc(s.d)}<br><a href="https://noqta.tn/en/services" target="_blank">See it on noqta.tn →</a>`);
+      conversation.sendToolResult(call.callId, { shown: s.t });
+    } else if (call.name === "show_contact") {
+      const msg = `Hello Noqta, I'm ${a.first_name ?? ""}. I need: ${a.need ?? ""}`;
+      card(`<b>Talk to the team${a.first_name ? ", " + esc(a.first_name) : ""}</b>Need: ${esc(a.need)}<br>
+        <a href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank">WhatsApp (prefilled, demo: no number)</a> ·
+        <a href="https://noqta.tn/en/contact" target="_blank">Contact form</a>`, "contact");
+      conversation.sendToolResult(call.callId, { shown: "contact options" });
+    } else {
+      conversation.sendToolResult(call.callId, { ok: false, why: "unknown_service" });
+    }
+  });
+  try { setStatus("Connecting…"); await conversation.connect(); }
+  catch (err) { setStatus("Failed: " + (err.message ?? err)); conversation = null; }
+};
+$("hang-up").onclick = async () => { await conversation?.disconnect(); conversation = null; refreshUsage(); };
+</script>
+</body>
+</html>
